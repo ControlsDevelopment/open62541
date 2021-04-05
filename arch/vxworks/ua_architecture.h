@@ -3,14 +3,13 @@
  *
  *    Copyright 2016-2017 (c) Julius Pfrommer, Fraunhofer IOSB
  *    Copyright 2017 (c) Stefan Profanter, fortiss GmbH
+ *    Copyright (c) 2020 Wind River Systems, Inc.
  */
 
 #ifdef UA_ARCHITECTURE_VXWORKS
 
 #ifndef PLUGINS_ARCH_VXWORKS_UA_ARCHITECTURE_H_
 #define PLUGINS_ARCH_VXWORKS_UA_ARCHITECTURE_H_
-
-#include <open62541/architecture_base.h>
 
 #include <errno.h>
 #include <time.h>
@@ -99,6 +98,7 @@
 
 #include <stdio.h>
 #define UA_snprintf snprintf
+#define UA_strncasecmp strncasecmp
 
 #define UA_LOG_SOCKET_ERRNO_WRAP(LOG) { \
     char *errno_str = strerror(errno); \

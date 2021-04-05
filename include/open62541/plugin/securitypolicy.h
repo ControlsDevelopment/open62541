@@ -10,9 +10,9 @@
 #ifndef UA_PLUGIN_SECURITYPOLICY_H_
 #define UA_PLUGIN_SECURITYPOLICY_H_
 
+#include <open62541/util.h>
 #include <open62541/plugin/log.h>
 #include <open62541/plugin/pki.h>
-#include <open62541/server.h>
 
 _UA_BEGIN_DECLS
 
@@ -194,7 +194,7 @@ typedef struct {
                                                UA_ByteString *thumbprint)
     UA_FUNC_ATTR_WARN_UNUSED_RESULT;
 
-    /* Compares the supplied certificate with the certificate in the endpoit context.
+    /* Compares the supplied certificate with the certificate in the endpoint context.
      *
      * @param securityPolicy the policy data that contains the certificate
      *                       to compare to.

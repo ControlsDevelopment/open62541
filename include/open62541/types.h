@@ -462,6 +462,9 @@ typedef struct {
 
 UA_EXPORT extern const UA_ExpandedNodeId UA_EXPANDEDNODEID_NULL;
 
+UA_StatusCode UA_EXPORT
+UA_ExpandedNodeId_print(const UA_ExpandedNodeId *id, UA_String *output);
+
 #ifdef UA_ENABLE_PARSING
 /* Parse the ExpandedNodeId format defined in Part 6, 5.3.1.11:
  *
@@ -519,6 +522,11 @@ UA_EXPANDEDNODEID_BYTESTRING_ALLOC(UA_UInt16 nsIndex, const char *chars) {
     id.serverIndex = 0; id.namespaceUri = UA_STRING_NULL; return id;
 }
 
+/* Does the ExpandedNodeId point to a local node? That is, are namespaceUri and
+ * serverIndex empty? */
+UA_Boolean UA_EXPORT
+UA_ExpandedNodeId_isLocal(const UA_ExpandedNodeId *n);
+
 /* Total ordering of ExpandedNodeId */
 UA_Order UA_EXPORT
 UA_ExpandedNodeId_order(const UA_ExpandedNodeId *n1, const UA_ExpandedNodeId *n2);
@@ -529,7 +537,9 @@ UA_ExpandedNodeId_equal(const UA_ExpandedNodeId *n1, const UA_ExpandedNodeId *n2
     return (UA_ExpandedNodeId_order(n1, n2) == UA_ORDER_EQ);
 }
 
-/* Returns a non-cryptographic hash for ExpandedNodeId */
+/* Returns a non-cryptographic hash for ExpandedNodeId. The hash of an
+ * ExpandedNodeId is identical to the hash of the embedded (simple) NodeId if
+ * the ServerIndex is zero and no NamespaceUri is set. */
 UA_UInt32 UA_EXPORT UA_ExpandedNodeId_hash(const UA_ExpandedNodeId *n);
 
 /**
@@ -588,6 +598,12 @@ UA_LOCALIZEDTEXT_ALLOC(const char *locale, const char *text) {
     UA_LocalizedText lt; lt.locale = UA_STRING_ALLOC(locale);
     lt.text = UA_STRING_ALLOC(text); return lt;
 }
+
+/* 
+ * Check if the StatusCode is bad.
+ * @return Returns UA_TRUE if StatusCode is bad, else UA_FALSE. */
+UA_EXPORT UA_Boolean
+UA_StatusCode_isBad(const UA_StatusCode code);
 
 /**
  * .. _numericrange:
@@ -737,7 +753,7 @@ UA_Variant_setScalar(UA_Variant *v, void * UA_RESTRICT p,
  * @param type The datatype of the value
  * @return Indicates whether the operation succeeded or returns an error code */
 UA_StatusCode UA_EXPORT
-UA_Variant_setScalarCopy(UA_Variant *v, const void *p,
+UA_Variant_setScalarCopy(UA_Variant *v, const void * UA_RESTRICT p,
                          const UA_DataType *type);
 
 /* Set the variant to an array that already resides in memory. The array takes
@@ -759,7 +775,7 @@ UA_Variant_setArray(UA_Variant *v, void * UA_RESTRICT array,
  * @param type The datatype of the array
  * @return Indicates whether the operation succeeded or returns an error code */
 UA_StatusCode UA_EXPORT
-UA_Variant_setArrayCopy(UA_Variant *v, const void *array,
+UA_Variant_setArrayCopy(UA_Variant *v, const void * UA_RESTRICT array,
                         size_t arraySize, const UA_DataType *type);
 
 /* Copy the variant, but use only a subset of the (multidimensional) array into
@@ -771,7 +787,7 @@ UA_Variant_setArrayCopy(UA_Variant *v, const void *array,
  * @param range The range of the copied data
  * @return Returns UA_STATUSCODE_GOOD or an error code */
 UA_StatusCode UA_EXPORT
-UA_Variant_copyRange(const UA_Variant *src, UA_Variant *dst,
+UA_Variant_copyRange(const UA_Variant *src, UA_Variant * UA_RESTRICT dst,
                      const UA_NumericRange range);
 
 /* Insert a range of data into an existing variant. The data array can't be
@@ -797,7 +813,7 @@ UA_Variant_setRange(UA_Variant *v, void * UA_RESTRICT array,
  * @param range The range of where the new data is inserted
  * @return Returns UA_STATUSCODE_GOOD or an error code */
 UA_StatusCode UA_EXPORT
-UA_Variant_setRangeCopy(UA_Variant *v, const void *array,
+UA_Variant_setRangeCopy(UA_Variant *v, const void * UA_RESTRICT array,
                         size_t arraySize, const UA_NumericRange range);
 
 /**
@@ -833,6 +849,29 @@ typedef struct {
         } decoded;
     } content;
 } UA_ExtensionObject;
+
+/* Initialize the ExtensionObject and set the "decoded" value to the given
+ * pointer. The value will be deleted when the ExtensionObject is cleared. */
+void UA_EXPORT
+UA_ExtensionObject_setValue(UA_ExtensionObject *eo,
+                            void * UA_RESTRICT p,
+                            const UA_DataType *type);
+
+/* Initialize the ExtensionObject and set the "decoded" value to the given
+ * pointer. The value will *not* be deleted when the ExtensionObject is
+ * cleared. */
+void UA_EXPORT
+UA_ExtensionObject_setValueNoDelete(UA_ExtensionObject *eo,
+                                    void * UA_RESTRICT p,
+                                    const UA_DataType *type);
+
+/* Initialize the ExtensionObject and set the "decoded" value to a fresh copy of
+ * the given value pointer. The value will be deleted when the ExtensionObject
+ * is cleared. */
+UA_StatusCode UA_EXPORT
+UA_ExtensionObject_setValueCopy(UA_ExtensionObject *eo,
+                                void * UA_RESTRICT p,
+                                const UA_DataType *type);
 
 /**
  * .. _datavalue:
@@ -904,9 +943,6 @@ typedef struct UA_DiagnosticInfo {
  * type operations as static inline functions. */
 
 typedef struct {
-#ifdef UA_ENABLE_TYPEDESCRIPTION
-    const char *memberName;
-#endif
     UA_UInt16 memberTypeIndex;    /* Index of the member in the array of data
                                      types */
     UA_Byte   padding;            /* How much padding is there before this
@@ -921,6 +957,9 @@ typedef struct {
                                      namespace zero only.*/
     UA_Boolean isArray       : 1; /* The member is an array */
     UA_Boolean isOptional    : 1; /* The member is an optional field */
+#ifdef UA_ENABLE_TYPEDESCRIPTION
+    const char *memberName;       /* Human-readable member name */
+#endif
 } UA_DataTypeMember;
 
 /* The DataType "kind" is an internal type classification. It is used to
@@ -961,10 +1000,9 @@ typedef enum {
 } UA_DataTypeKind;
 
 struct UA_DataType {
-#ifdef UA_ENABLE_TYPEDESCRIPTION
-    const char *typeName;
-#endif
     UA_NodeId typeId;                /* The nodeid of the type */
+    UA_NodeId binaryEncodingId;      /* NodeId of datatype when encoded as binary */
+    //UA_NodeId xmlEncodingId;       /* NodeId of datatype when encoded as XML */
     UA_UInt16 memSize;               /* Size of the struct in memory */
     UA_UInt16 typeIndex;             /* Index of the type in the datatypetable */
     UA_UInt32 typeKind         : 6;  /* Dispatch index for the handling routines */
@@ -973,9 +1011,13 @@ struct UA_DataType {
     UA_UInt32 overlayable      : 1;  /* The type has the identical memory layout
                                       * in memory and on the binary stream. */
     UA_UInt32 membersSize      : 8;  /* How many members does the type have? */
-    UA_UInt32 binaryEncodingId;      /* NodeId of datatype when encoded as binary */
-    //UA_UInt16  xmlEncodingId;      /* NodeId of datatype when encoded as XML */
     UA_DataTypeMember *members;
+
+    /* The typename is only for debugging. Move last so the members pointers
+     * stays within the cacheline. */
+#ifdef UA_ENABLE_TYPEDESCRIPTION
+    const char *typeName;
+#endif
 };
 
 /* Test if the data type is a numeric builtin data type. This includes Boolean,
@@ -1040,6 +1082,17 @@ void UA_EXPORT UA_clear(void *p, const UA_DataType *type);
  * @param type The datatype description of the variable */
 void UA_EXPORT UA_delete(void *p, const UA_DataType *type);
 
+#ifdef UA_ENABLE_TYPEDESCRIPTION
+/* Pretty-print the value from the datatype.
+ *
+ * @param p The memory location of the variable
+ * @param type The datatype description of the variable
+ * @param output A string that is memory-allocated for the pretty-printed output
+ * @return Indicates whether the operation succeeded*/
+UA_StatusCode UA_EXPORT
+UA_print(const void *p, const UA_DataType *type, UA_String *output);
+#endif
+
 /**
  * .. _array-handling:
  *
@@ -1102,7 +1155,7 @@ UA_Guid UA_EXPORT UA_Guid_random(void);     /* no cryptographic entropy */
 /* The following is used to exclude type names in the definition of UA_DataType
  * structures if the feature is disabled. */
 #ifdef UA_ENABLE_TYPEDESCRIPTION
-# define UA_TYPENAME(name) name,
+# define UA_TYPENAME(name) , name
 #else
 # define UA_TYPENAME(name)
 #endif

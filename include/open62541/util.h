@@ -10,8 +10,23 @@
 
 #include <open62541/types.h>
 #include <open62541/types_generated.h>
+#include <open62541/types_generated_handling.h>
 
 _UA_BEGIN_DECLS
+
+/**
+ * Forward Declarations
+ * --------------------
+ * Opaque oointers used by the plugins. */
+
+struct UA_Server;
+typedef struct UA_Server UA_Server;
+
+struct UA_ServerConfig;
+typedef struct UA_ServerConfig UA_ServerConfig;
+
+struct UA_Client;
+typedef struct UA_Client UA_Client;
 
 /**
  * Endpoint URL Parser
@@ -66,11 +81,11 @@ UA_readNumberWithBase(const UA_Byte *buf, size_t buflen,
                       UA_UInt32 *number, UA_Byte base);
 
 #ifndef UA_MIN
-#define UA_MIN(A,B) (A > B ? B : A)
+#define UA_MIN(A, B) ((A) > (B) ? (B) : (A))
 #endif
 
 #ifndef UA_MAX
-#define UA_MAX(A,B) (A > B ? A : B)
+#define UA_MAX(A, B) ((A) > (B) ? (A) : (B))
 #endif
 
 /**

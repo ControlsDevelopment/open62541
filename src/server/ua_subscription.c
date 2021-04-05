@@ -22,45 +22,54 @@
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS /* conditional compilation */
 
+#define UA_MAX_RETRANSMISSIONQUEUESIZE 256
+
 UA_Subscription *
-UA_Subscription_new(UA_Session *session, UA_UInt32 subscriptionId) {
+UA_Subscription_new() {
     /* Allocate the memory */
-    UA_Subscription *newSub =
-        (UA_Subscription*)UA_calloc(1, sizeof(UA_Subscription));
+    UA_Subscription *newSub = (UA_Subscription*)UA_calloc(1, sizeof(UA_Subscription));
     if(!newSub)
         return NULL;
 
-    /* Remaining members are covered by calloc zeroing out the memory */
-    newSub->session = session;
-    newSub->subscriptionId = subscriptionId;
-    newSub->state = UA_SUBSCRIPTIONSTATE_NORMAL; /* The first publish response is sent immediately */
+    /* The first publish response is sent immediately */
+    newSub->state = UA_SUBSCRIPTIONSTATE_NORMAL;
+
     /* Even if the first publish response is a keepalive the sequence number is 1.
      * This can happen by a subscription without a monitored item (see CTT test scripts). */
     newSub->nextSequenceNumber = 1;
+
     TAILQ_INIT(&newSub->retransmissionQueue);
     TAILQ_INIT(&newSub->notificationQueue);
     return newSub;
 }
 
 void
-UA_Subscription_deleteMembers(UA_Server *server, UA_Subscription *sub) {
+UA_Subscription_delete(UA_Server *server, UA_Subscription *sub) {
     UA_LOCK_ASSERT(server->serviceMutex, 1);
 
+    /* Unregister the publish callback */
     Subscription_unregisterPublishCallback(server, sub);
 
+    UA_LOG_INFO_SUBSCRIPTION(&server->config.logger, sub, "Subscription deleted");
+
+    /* Detach from the session if necessary */
+    if(sub->session)
+        UA_Session_detachSubscription(server, sub->session, sub);
+
+    /* Remove from the server if not previously registered */
+    if(sub->serverListEntry.le_prev) {
+        LIST_REMOVE(sub, serverListEntry);
+        UA_assert(server->subscriptionsSize > 0);
+        server->subscriptionsSize--;
+    }
+
     /* Delete monitored Items */
+    UA_assert(server->monitoredItemsSize >= sub->monitoredItemsSize);
     UA_MonitoredItem *mon, *tmp_mon;
     LIST_FOREACH_SAFE(mon, &sub->monitoredItems, listEntry, tmp_mon) {
-        LIST_REMOVE(mon, listEntry);
-        UA_LOG_INFO_SESSION(&server->config.logger, sub->session,
-                            "Subscription %" PRIu32 " | MonitoredItem %" PRIi32 " | "
-                            "Deleted the MonitoredItem", sub->subscriptionId,
-                            mon->monitoredItemId);
         UA_MonitoredItem_delete(server, mon);
     }
-    UA_assert(server->numMonitoredItems >= sub->monitoredItemsSize);
-    server->numMonitoredItems -= sub->monitoredItemsSize;
-    sub->monitoredItemsSize = 0;
+    UA_assert(sub->monitoredItemsSize == 0);
 
     /* Delete Retransmission Queue */
     UA_NotificationMessageEntry *nme, *nme_tmp;
@@ -68,14 +77,21 @@ UA_Subscription_deleteMembers(UA_Server *server, UA_Subscription *sub) {
         TAILQ_REMOVE(&sub->retransmissionQueue, nme, listEntry);
         UA_NotificationMessage_clear(&nme->message);
         UA_free(nme);
-        --sub->session->totalRetransmissionQueueSize;
+        if(sub->session)
+            --sub->session->totalRetransmissionQueueSize;
         --sub->retransmissionQueueSize;
     }
     UA_assert(sub->retransmissionQueueSize == 0);
 
-    UA_LOG_INFO_SESSION(&server->config.logger, sub->session,
-                        "Subscription %" PRIu32 " | Deleted the Subscription",
-                        sub->subscriptionId);
+    /* Add a delayed callback to remove the Subscription when the current jobs
+     * have completed. Pointers to the subscription may still exist upwards in
+     * the call stack. */
+    sub->delayedFreePointers.callback = NULL;
+    sub->delayedFreePointers.application = server;
+    sub->delayedFreePointers.data = NULL;
+    sub->delayedFreePointers.nextTime = UA_DateTime_nowMonotonic() + 1;
+    sub->delayedFreePointers.interval = 0; /* Remove the structure */
+    UA_Timer_addTimerEntry(&server->timer, &sub->delayedFreePointers, NULL);
 }
 
 UA_MonitoredItem *
@@ -88,52 +104,24 @@ UA_Subscription_getMonitoredItem(UA_Subscription *sub, UA_UInt32 monitoredItemId
     return mon;
 }
 
-UA_StatusCode
-UA_Subscription_deleteMonitoredItem(UA_Server *server, UA_Subscription *sub,
-                                    UA_UInt32 monitoredItemId) {
-    UA_LOCK_ASSERT(server->serviceMutex, 1);
-
-    /* Find the MonitoredItem */
-    UA_MonitoredItem *mon;
-    LIST_FOREACH(mon, &sub->monitoredItems, listEntry) {
-        if(mon->monitoredItemId == monitoredItemId)
-            break;
-    }
-    if(!mon)
-        return UA_STATUSCODE_BADMONITOREDITEMIDINVALID;
-
-    UA_LOG_INFO_SESSION(&server->config.logger, sub->session,
-                        "Subscription %" PRIu32 " | MonitoredItem %" PRIi32 " | "
-                        "Delete the MonitoredItem", sub->subscriptionId,
-                        mon->monitoredItemId);
-
-    /* Remove the MonitoredItem */
-    LIST_REMOVE(mon, listEntry);
-    UA_assert(sub->monitoredItemsSize > 0);
-    UA_assert(server->numMonitoredItems > 0);
-    sub->monitoredItemsSize--;
-    server->numMonitoredItems--;
-
-    /* Remove content and delayed free */
-    UA_MonitoredItem_delete(server, mon);
-
-    return UA_STATUSCODE_GOOD;
-}
-
-void
-UA_Subscription_addMonitoredItem(UA_Server *server, UA_Subscription *sub, UA_MonitoredItem *newMon) {
-    sub->monitoredItemsSize++;
-    server->numMonitoredItems++;
-    LIST_INSERT_HEAD(&sub->monitoredItems, newMon, listEntry);
+static void
+removeOldestRetransmissionMessageFromSub(UA_Subscription *sub) {
+    UA_NotificationMessageEntry *oldestEntry =
+        TAILQ_LAST(&sub->retransmissionQueue, ListOfNotificationMessages);
+    TAILQ_REMOVE(&sub->retransmissionQueue, oldestEntry, listEntry);
+    UA_NotificationMessage_clear(&oldestEntry->message);
+    UA_free(oldestEntry);
+    --sub->retransmissionQueueSize;
+    if(sub->session)
+        --sub->session->totalRetransmissionQueueSize;
 }
 
 static void
-removeOldestRetransmissionMessage(UA_Session *session) {
+removeOldestRetransmissionMessageFromSession(UA_Session *session) {
     UA_NotificationMessageEntry *oldestEntry = NULL;
     UA_Subscription *oldestSub = NULL;
-
     UA_Subscription *sub;
-    LIST_FOREACH(sub, &session->serverSubscriptions, listEntry) {
+    TAILQ_FOREACH(sub, &session->subscriptions, sessionListEntry) {
         UA_NotificationMessageEntry *first =
             TAILQ_LAST(&sub->retransmissionQueue, ListOfNotificationMessages);
         if(!first)
@@ -146,28 +134,28 @@ removeOldestRetransmissionMessage(UA_Session *session) {
     UA_assert(oldestEntry);
     UA_assert(oldestSub);
 
-    TAILQ_REMOVE(&oldestSub->retransmissionQueue, oldestEntry, listEntry);
-    UA_NotificationMessage_clear(&oldestEntry->message);
-    UA_free(oldestEntry);
-    --session->totalRetransmissionQueueSize;
-    --oldestSub->retransmissionQueueSize;
+    removeOldestRetransmissionMessageFromSub(oldestSub);
 }
 
 static void
 UA_Subscription_addRetransmissionMessage(UA_Server *server, UA_Subscription *sub,
                                          UA_NotificationMessageEntry *entry) {
     /* Release the oldest entry if there is not enough space */
-    if(server->config.maxRetransmissionQueueSize > 0 &&
-       sub->session->totalRetransmissionQueueSize >= server->config.maxRetransmissionQueueSize) {
-        UA_LOG_WARNING_SESSION(&server->config.logger, sub->session, "Subscription %" PRIu32 " | "
-                               "Retransmission queue overflow", sub->subscriptionId);
-        removeOldestRetransmissionMessage(sub->session);
+    UA_Session *session = sub->session;
+    if(sub->retransmissionQueueSize >= UA_MAX_RETRANSMISSIONQUEUESIZE) {
+        removeOldestRetransmissionMessageFromSub(sub);
+    } else if(session && server->config.maxRetransmissionQueueSize > 0 &&
+               session->totalRetransmissionQueueSize >= server->config.maxRetransmissionQueueSize) {
+        UA_LOG_WARNING_SUBSCRIPTION(&server->config.logger, sub,
+                                    "Retransmission queue overflow");
+        removeOldestRetransmissionMessageFromSession(sub->session);
     }
 
     /* Add entry */
     TAILQ_INSERT_TAIL(&sub->retransmissionQueue, entry, listEntry);
-    ++sub->session->totalRetransmissionQueueSize;
     ++sub->retransmissionQueueSize;
+    if(session)
+        ++session->totalRetransmissionQueueSize;
 }
 
 UA_StatusCode
@@ -183,10 +171,13 @@ UA_Subscription_removeRetransmissionMessage(UA_Subscription *sub, UA_UInt32 sequ
 
     /* Remove the retransmission message */
     TAILQ_REMOVE(&sub->retransmissionQueue, entry, listEntry);
-    --sub->session->totalRetransmissionQueueSize;
     --sub->retransmissionQueueSize;
     UA_NotificationMessage_clear(&entry->message);
     UA_free(entry);
+
+    if(sub->session)
+        --sub->session->totalRetransmissionQueueSize;
+
     return UA_STATUSCODE_GOOD;
 }
 
@@ -195,7 +186,12 @@ prepareNotificationMessage(UA_Server *server, UA_Subscription *sub,
                            UA_NotificationMessage *message, size_t notifications) {
     UA_assert(notifications > 0);
 
-    /* Allocate an ExtensionObject for events and data */
+    /* Allocate an ExtensionObject for Event- and DataChange-Notifications. Also
+     * there can be StatusChange-Notifications. The standard says in Part 4,
+     * 7.2.1:
+     *
+     * If a Subscription contains MonitoredItems for events and data, this array
+     * should have not more than 2 elements. */
     message->notificationData = (UA_ExtensionObject*)
         UA_Array_new(2, &UA_TYPES[UA_TYPES_EXTENSIONOBJECT]);
     if(!message->notificationData)
@@ -205,16 +201,15 @@ prepareNotificationMessage(UA_Server *server, UA_Subscription *sub,
     /* Pre-allocate DataChangeNotifications */
     size_t notificationDataIdx = 0;
     UA_DataChangeNotification *dcn = NULL;
+    size_t dcnPos = 0; /* How many DataChangeNotifications were moved into the list? */
     if(sub->dataChangeNotifications > 0) {
         dcn = UA_DataChangeNotification_new();
         if(!dcn) {
             UA_NotificationMessage_clear(message);
             return UA_STATUSCODE_BADOUTOFMEMORY;
         }
-        message->notificationData->encoding = UA_EXTENSIONOBJECT_DECODED;
-        message->notificationData->content.decoded.data = dcn;
-        message->notificationData->content.decoded.type = &UA_TYPES[UA_TYPES_DATACHANGENOTIFICATION];
-
+        UA_ExtensionObject_setValue(message->notificationData, dcn,
+                                    &UA_TYPES[UA_TYPES_DATACHANGENOTIFICATION]);
         size_t dcnSize = sub->dataChangeNotifications;
         if(dcnSize > notifications)
             dcnSize = notifications;
@@ -230,33 +225,20 @@ prepareNotificationMessage(UA_Server *server, UA_Subscription *sub,
 
 #ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
     UA_EventNotificationList *enl = NULL;
-    UA_StatusChangeNotification *scn = NULL;
-    /* Pre-allocate either StatusChange or EventNotifications. Sending a
-     * (single) StatusChangeNotification has priority. */
-    if(sub->statusChangeNotifications > 0) {
-        scn = UA_StatusChangeNotification_new();
-        if(!scn) {
-            UA_NotificationMessage_clear(message);
-            return UA_STATUSCODE_BADOUTOFMEMORY;
-        }
-        message->notificationData[notificationDataIdx].encoding = UA_EXTENSIONOBJECT_DECODED;
-        message->notificationData[notificationDataIdx].content.decoded.data = scn;
-        message->notificationData[notificationDataIdx].content.decoded.type = &UA_TYPES[UA_TYPES_STATUSCHANGENOTIFICATION];
-        notificationDataIdx++;
-    } else if(sub->eventNotifications > 0) {
+    size_t enlPos = 0; /* How many EventNotifications were moved into the list? */
+    if(sub->eventNotifications > 0) {
         enl = UA_EventNotificationList_new();
         if(!enl) {
             UA_NotificationMessage_clear(message);
             return UA_STATUSCODE_BADOUTOFMEMORY;
         }
-        message->notificationData[notificationDataIdx].encoding = UA_EXTENSIONOBJECT_DECODED;
-        message->notificationData[notificationDataIdx].content.decoded.data = enl;
-        message->notificationData[notificationDataIdx].content.decoded.type = &UA_TYPES[UA_TYPES_EVENTNOTIFICATIONLIST];
-
+        UA_ExtensionObject_setValue(&message->notificationData[notificationDataIdx],
+                                    enl, &UA_TYPES[UA_TYPES_EVENTNOTIFICATIONLIST]);
         size_t enlSize = sub->eventNotifications;
         if(enlSize > notifications)
             enlSize = notifications;
-        enl->events = (UA_EventFieldList*) UA_Array_new(enlSize, &UA_TYPES[UA_TYPES_EVENTFIELDLIST]);
+        enl->events = (UA_EventFieldList*)
+            UA_Array_new(enlSize, &UA_TYPES[UA_TYPES_EVENTFIELDLIST]);
         if(!enl->events) {
             UA_NotificationMessage_clear(message);
             return UA_STATUSCODE_BADOUTOFMEMORY;
@@ -272,46 +254,40 @@ prepareNotificationMessage(UA_Server *server, UA_Subscription *sub,
     /* <-- The point of no return --> */
 
     size_t totalNotifications = 0; /* How many notifications were moved to the response overall? */
-    size_t dcnPos = 0; /* How many DataChangeNotifications were put into the list? */
-#ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
-    size_t enlPos = 0; /* How many EventNotifications were moved into the list */
-#endif
     UA_Notification *notification, *notification_tmp;
     TAILQ_FOREACH_SAFE(notification, &sub->notificationQueue, globalEntry, notification_tmp) {
         if(totalNotifications >= notifications)
             break;
 
-        UA_MonitoredItem *mon = notification->mon;
-
-        /* Remove from the queues and decrease the counters */
-        UA_Notification_dequeue(server, notification);
-
         /* Move the content to the response */
+        switch(notification->mon->itemToMonitor.attributeId) {
 #ifdef UA_ENABLE_SUBSCRIPTIONS_EVENTS
-        if(mon->attributeId == UA_ATTRIBUTEID_EVENTNOTIFIER) {
-
+        case UA_ATTRIBUTEID_EVENTNOTIFIER:
             UA_assert(enl != NULL); /* Have at least one event notification */
-
-            /* Move the content to the response */
-            UA_EventFieldList *efl = &enl->events[enlPos];
-            *efl = notification->data.event.fields;
-            UA_EventFieldList_init(&notification->data.event.fields);
-            efl->clientHandle = mon->clientHandle;
-
+            enl->events[enlPos] = notification->data.event;
+            UA_EventFieldList_init(&notification->data.event);
             enlPos++;
-        } else
+            break;
 #endif
-        {
+        default:
             UA_assert(dcn != NULL); /* Have at least one change notification */
-            /* Move the content to the response */
-            UA_MonitoredItemNotification *min = &dcn->monitoredItems[dcnPos];
-            min->clientHandle = mon->clientHandle;
-            min->value = notification->data.value;
-            UA_DataValue_init(&notification->data.value); /* Reset after the value has been moved */
+            dcn->monitoredItems[dcnPos] = notification->data.dataChange;
+            UA_DataValue_init(&notification->data.dataChange.value);
             dcnPos++;
+            break;
         }
 
-        UA_Notification_delete(notification);
+        /* If there are Notifications *before this one* in the MonitoredItem-
+         * local queue, remove all of them. These are earlier Notifications that
+         * are non-reporting. And we don't want them to show up after the
+         * current Notification has been sent out. */
+        UA_Notification *prev;
+        while((prev = TAILQ_PREV(notification, NotificationQueue, listEntry)))
+            UA_Notification_delete(server, prev);
+
+        /* Delete the notification, remove from the queues and decrease the counters */
+        UA_Notification_delete(server, notification);
+
         totalNotifications++;
     }
 
@@ -349,36 +325,95 @@ UA_Subscription_nextSequenceNumber(UA_UInt32 sequenceNumber) {
 
 static void
 publishCallback(UA_Server *server, UA_Subscription *sub) {
-    sub->readyNotifications = sub->notificationQueueSize;
     UA_LOCK(server->serviceMutex);
+    sub->readyNotifications = sub->notificationQueueSize;
     UA_Subscription_publish(server, sub);
     UA_UNLOCK(server->serviceMutex);
+}
+
+static void
+sendStatusChangeDelete(UA_Server *server, UA_Subscription *sub,
+                       UA_PublishResponseEntry *pre) {
+    /* Cannot send out the StatusChange because no response is queued.
+     * Delete the Subscription without sending the StatusChange. */
+    if(!pre) {
+        UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+                                  "Cannot send the StatusChange notification. "
+                                  "Removing the subscription.");
+        UA_Subscription_delete(server, sub);
+        return;
+    }
+
+    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+                              "Sending out a StatusChange "
+                              "notification and removing the subscription");
+
+    /* Populate the response */
+    UA_PublishResponse *response = &pre->response;
+
+    UA_StatusChangeNotification scn;
+    UA_StatusChangeNotification_init(&scn);
+    scn.status = sub->statusChange;
+
+    UA_ExtensionObject notificationData;
+    UA_ExtensionObject_setValue(&notificationData, &scn,
+                                &UA_TYPES[UA_TYPES_STATUSCHANGENOTIFICATION]);
+
+    response->responseHeader.timestamp = UA_DateTime_now();
+    response->notificationMessage.notificationData = &notificationData;
+    response->notificationMessage.notificationDataSize = 1;
+    response->subscriptionId = sub->subscriptionId;
+    response->notificationMessage.publishTime = response->responseHeader.timestamp;
+    response->notificationMessage.sequenceNumber = sub->nextSequenceNumber;
+
+    /* Send the response */
+    UA_assert(sub->session); /* Otherwise pre is NULL */
+    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+                              "Sending out a publish response");
+    sendResponse(server, sub->session, sub->session->header.channel, pre->requestId,
+                 (UA_Response *)response, &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
+
+    /* Clean up */
+    response->notificationMessage.notificationData = NULL;
+    response->notificationMessage.notificationDataSize = 0;
+    UA_PublishResponse_clear(&pre->response);
+    UA_free(pre);
+
+    /* Delete the subscription */
+    UA_Subscription_delete(server, sub);
 }
 
 void
 UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
     UA_LOCK_ASSERT(server->serviceMutex, 1);
+    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub, "Publish Callback");
+    UA_assert(sub);
 
-    UA_LOG_DEBUG_SESSION(&server->config.logger, sub->session, "Subscription %" PRIu32 " | "
-                         "Publish Callback", sub->subscriptionId);
     /* Dequeue a response */
-    UA_PublishResponseEntry *pre = UA_Session_dequeuePublishReq(sub->session);
-    if(pre) {
-        sub->currentLifetimeCount = 0; /* Reset the LifetimeCounter */
-    } else {
-        UA_LOG_DEBUG_SESSION(&server->config.logger, sub->session,
-                             "Subscription %" PRIu32 " | The publish queue is empty",
-                             sub->subscriptionId);
-        ++sub->currentLifetimeCount;
+    UA_PublishResponseEntry *pre = NULL;
+    if(sub->session)
+        pre = UA_Session_dequeuePublishReq(sub->session);
 
+    /* Update the LifetimeCounter */
+    if(pre) {
+        sub->currentLifetimeCount = 0;
+    } else {
+        UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+                                  "The publish queue is empty");
+        ++sub->currentLifetimeCount;
         if(sub->currentLifetimeCount > sub->lifeTimeCount) {
-            UA_LOG_DEBUG_SESSION(&server->config.logger, sub->session,
-                                 "Subscription %" PRIu32 " | End of lifetime "
-                                 "for subscription", sub->subscriptionId);
-            UA_Session_deleteSubscription(server, sub->session, sub->subscriptionId);
-            /* TODO: send a StatusChangeNotification with Bad_Timeout */
-            return;
+            UA_LOG_WARNING_SUBSCRIPTION(&server->config.logger, sub,
+                                        "End of subscription lifetime");
+            /* Set the StatusChange to delete the subscription. */
+            sub->statusChange = UA_STATUSCODE_BADTIMEOUT;
         }
+    }
+
+    /* Send a StatusChange notification if possible and delete the
+     * Subscription */
+    if(sub->statusChange != UA_STATUSCODE_GOOD) {
+        sendStatusChangeDelete(server, sub, pre);
+        return;
     }
 
     /* If there are several late publish responses... */
@@ -386,10 +421,7 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
         sub->readyNotifications = sub->notificationQueueSize;
 
     /* Count the available notifications */
-    UA_UInt32 notifications = sub->readyNotifications;
-    if(!sub->publishingEnabled)
-        notifications = 0;
-
+    UA_UInt32 notifications = (sub->publishingEnabled) ? sub->readyNotifications : 0;
     UA_Boolean moreNotifications = false;
     if(notifications > sub->notificationsPerPublish) {
         notifications = sub->notificationsPerPublish;
@@ -404,22 +436,23 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
                 UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
             return;
         }
-        UA_LOG_DEBUG_SESSION(&server->config.logger, sub->session,
-                             "Subscription %" PRIu32 " | Sending a KeepAlive",
-                             sub->subscriptionId);
+        UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub, "Sending a KeepAlive");
     }
 
-    /* We want to send a response. Is the channel open? */
-    UA_SecureChannel *channel = sub->session->header.channel;
-    if(!channel || !pre) {
-        UA_LOG_DEBUG_SESSION(&server->config.logger, sub->session,
-                             "Subscription %" PRIu32 " | Want to send a publish response but can't. "
-                             "The subscription is late.", sub->subscriptionId);
+    /* We want to send a response, but cannot. Either because there is no queued
+     * response or because the Subscription is detached from a Session or because
+     * the SecureChannel for the Session is closed. */
+    if(!pre || !sub->session || !sub->session->header.channel) {
+        UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+                                  "Want to send a publish response but can't. "
+                                  "The subscription is late.");
         sub->state = UA_SUBSCRIPTIONSTATE_LATE;
         if(pre)
             UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
         return;
     }
+
+    UA_assert(sub->session); /* Otherwise pre is NULL */
 
     /* Prepare the response */
     UA_PublishResponse *response = &pre->response;
@@ -428,11 +461,12 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
     if(notifications > 0) {
         if(server->config.enableRetransmissionQueue) {
             /* Allocate the retransmission entry */
-            retransmission = (UA_NotificationMessageEntry*)UA_malloc(sizeof(UA_NotificationMessageEntry));
+            retransmission = (UA_NotificationMessageEntry*)
+                UA_malloc(sizeof(UA_NotificationMessageEntry));
             if(!retransmission) {
-                UA_LOG_WARNING_SESSION(&server->config.logger, sub->session,
-                                       "Subscription %" PRIu32 " | Could not allocate memory for retransmission. "
-                                       "The subscription is late.", sub->subscriptionId);
+                UA_LOG_WARNING_SUBSCRIPTION(&server->config.logger, sub,
+                                            "Could not allocate memory for retransmission. "
+                                            "The subscription is late.");
                 sub->state = UA_SUBSCRIPTIONSTATE_LATE;
                 UA_Session_queuePublishReq(sub->session, pre, true); /* Re-enqueue */
                 return;
@@ -442,9 +476,9 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
         /* Prepare the response */
         UA_StatusCode retval = prepareNotificationMessage(server, sub, message, notifications);
         if(retval != UA_STATUSCODE_GOOD) {
-            UA_LOG_WARNING_SESSION(&server->config.logger, sub->session,
-                                   "Subscription %" PRIu32 " | Could not prepare the notification message. "
-                                   "The subscription is late.", sub->subscriptionId);
+            UA_LOG_WARNING_SUBSCRIPTION(&server->config.logger, sub,
+                                        "Could not prepare the notification message. "
+                                        "The subscription is late.");
             /* If the retransmission queue is enabled a retransmission message is allocated */
             if(retransmission)
                 UA_free(retransmission);
@@ -466,44 +500,42 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
     response->moreNotifications = moreNotifications;
     message->publishTime = response->responseHeader.timestamp;
 
-    /* Set sequence number to message. Started at 1 which is given
-     * during creating a new subscription. The 1 is required for
-     * initial publish response with or without an monitored item. */
+    /* Set sequence number to message. Started at 1 which is given during
+     * creating a new subscription. The 1 is required for initial publish
+     * response with or without an monitored item. */
     message->sequenceNumber = sub->nextSequenceNumber;
 
     if(notifications > 0) {
-        /* If the retransmission queue is enabled a retransmission message is allocated */
+        /* If the retransmission queue is enabled a retransmission message is
+         * allocated */
         if(retransmission) {
             /* Put the notification message into the retransmission queue. This
-             * needs to be done here, so that the message itself is included in the
-             * available sequence numbers for acknowledgement. */
+             * needs to be done here, so that the message itself is included in
+             * the available sequence numbers for acknowledgement. */
             retransmission->message = response->notificationMessage;
             UA_Subscription_addRetransmissionMessage(server, sub, retransmission);
         }
-        /* Only if a notification was created, the sequence number must be increased.
-         * For a keepalive the sequence number can be reused. */
+        /* Only if a notification was created, the sequence number must be
+         * increased. For a keepalive the sequence number can be reused. */
         sub->nextSequenceNumber = UA_Subscription_nextSequenceNumber(sub->nextSequenceNumber);
     }
 
     /* Get the available sequence numbers from the retransmission queue */
-    size_t available = sub->retransmissionQueueSize;
-    UA_STACKARRAY(UA_UInt32, seqNumbers, available);
-    if(available > 0) {
-        response->availableSequenceNumbers = seqNumbers;
-        response->availableSequenceNumbersSize = available;
-        size_t i = 0;
-        UA_NotificationMessageEntry *nme;
-        TAILQ_FOREACH(nme, &sub->retransmissionQueue, listEntry) {
-            response->availableSequenceNumbers[i] = nme->message.sequenceNumber;
-            ++i;
-        }
+    UA_assert(sub->retransmissionQueueSize <= UA_MAX_RETRANSMISSIONQUEUESIZE);
+    UA_UInt32 seqNumbers[UA_MAX_RETRANSMISSIONQUEUESIZE];
+    response->availableSequenceNumbers = seqNumbers;
+    response->availableSequenceNumbersSize = sub->retransmissionQueueSize;
+    size_t i = 0;
+    UA_NotificationMessageEntry *nme;
+    TAILQ_FOREACH(nme, &sub->retransmissionQueue, listEntry) {
+        response->availableSequenceNumbers[i] = nme->message.sequenceNumber;
+        ++i;
     }
+    UA_assert(i == sub->retransmissionQueueSize);
 
     /* Send the response */
-    UA_LOG_DEBUG_SESSION(&server->config.logger, sub->session,
-                         "Subscription %" PRIu32 " | Sending out a publish response "
-                         "with %" PRIu32 " notifications", sub->subscriptionId,
-                         notifications);
+    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub, "Sending out a publish response "
+                              "with %" PRIu32 " notifications", notifications);
     sendResponse(server, sub->session, sub->session->header.channel, pre->requestId,
                  (UA_Response*)response, &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
 
@@ -526,7 +558,7 @@ UA_Subscription_publish(UA_Server *server, UA_Subscription *sub) {
 }
 
 UA_Boolean
-UA_Subscription_reachedPublishReqLimit(UA_Server *server,  UA_Session *session) {
+UA_Session_reachedPublishReqLimit(UA_Server *server, UA_Session *session) {
     UA_LOG_DEBUG_SESSION(&server->config.logger, session,
                          "Reached number of publish request limit");
 
@@ -568,55 +600,33 @@ UA_Subscription_reachedPublishReqLimit(UA_Server *server,  UA_Session *session) 
 
 UA_StatusCode
 Subscription_registerPublishCallback(UA_Server *server, UA_Subscription *sub) {
-    UA_LOG_DEBUG_SESSION(&server->config.logger, sub->session,
-                         "Subscription %" PRIu32 " | Register subscription "
-                         "publishing callback", sub->subscriptionId);
+    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+                              "Register subscription publishing callback");
     UA_LOCK_ASSERT(server->serviceMutex, 1);
 
-    if(sub->publishCallbackIsRegistered)
+    if(sub->publishCallbackId > 0)
         return UA_STATUSCODE_GOOD;
 
     UA_StatusCode retval =
         addRepeatedCallback(server, (UA_ServerCallback)publishCallback,
-                            sub, (UA_UInt32)sub->publishingInterval, &sub->publishCallbackId);
+                            sub, sub->publishingInterval, &sub->publishCallbackId);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
-    sub->publishCallbackIsRegistered = true;
+    UA_assert(sub->publishCallbackId > 0);
     return UA_STATUSCODE_GOOD;
 }
 
 void
 Subscription_unregisterPublishCallback(UA_Server *server, UA_Subscription *sub) {
-    UA_LOG_DEBUG_SESSION(&server->config.logger, sub->session, "Subscription %" PRIu32 " | "
-                         "Unregister subscription publishing callback", sub->subscriptionId);
+    UA_LOG_DEBUG_SUBSCRIPTION(&server->config.logger, sub,
+                              "Unregister subscription publishing callback");
 
-    if(!sub->publishCallbackIsRegistered)
+    if(sub->publishCallbackId == 0)
         return;
 
     removeCallback(server, sub->publishCallbackId);
-    sub->publishCallbackIsRegistered = false;
-}
-
-/* When the session has publish requests stored but the last subscription is
- * deleted... Send out empty responses */
-void
-UA_Subscription_answerPublishRequestsNoSubscription(UA_Server *server, UA_Session *session) {
-    /* No session or there are remaining subscriptions */
-    if(!session || LIST_FIRST(&session->serverSubscriptions))
-        return;
-
-    /* Send a response for every queued request */
-    UA_PublishResponseEntry *pre;
-    while((pre = UA_Session_dequeuePublishReq(session))) {
-        UA_PublishResponse *response = &pre->response;
-        response->responseHeader.serviceResult = UA_STATUSCODE_BADNOSUBSCRIPTION;
-        response->responseHeader.timestamp = UA_DateTime_now();
-        sendResponse(server, session, session->header.channel, pre->requestId,
-                     (UA_Response*)response, &UA_TYPES[UA_TYPES_PUBLISHRESPONSE]);
-        UA_PublishResponse_clear(response);
-        UA_free(pre);
-    }
+    sub->publishCallbackId = 0;
 }
 
 #endif /* UA_ENABLE_SUBSCRIPTIONS */

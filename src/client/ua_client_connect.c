@@ -229,7 +229,7 @@ void
 processERRResponse(UA_Client *client, const UA_ByteString *chunk) {
     client->channel.state = UA_SECURECHANNELSTATE_CLOSING;
 
-    size_t offset = 8; /* TODO: Make a define for the magic number */
+    size_t offset = 0;
     UA_TcpErrorMessage errMessage;
     UA_StatusCode res = UA_TcpErrorMessage_decodeBinary(chunk, &offset, &errMessage);
     if(res != UA_STATUSCODE_GOOD) {
@@ -260,7 +260,7 @@ processACKResponse(UA_Client *client, const UA_ByteString *chunk) {
     UA_LOG_DEBUG(&client->config.logger, UA_LOGCATEGORY_NETWORK, "Received ACK message");
 
     /* Decode the message */
-    size_t offset = 8;
+    size_t offset = 0;
     UA_TcpAcknowledgeMessage ackMessage;
     client->connectStatus = UA_TcpAcknowledgeMessage_decodeBinary(chunk, &offset, &ackMessage);
     if(client->connectStatus != UA_STATUSCODE_GOOD) {
@@ -328,9 +328,10 @@ sendHELMessage(UA_Client *client) {
     return retval;
 }
 
-static void
-processOPNResponseDecoded(UA_Client *client, const UA_ByteString *message, size_t offset) {
+void
+processOPNResponse(UA_Client *client, const UA_ByteString *message) {
     /* Is the content of the expected type? */
+    size_t offset = 0;
     UA_NodeId responseId;
     UA_NodeId expectedId =
         UA_NODEID_NUMERIC(0, UA_NS0ID_OPENSECURECHANNELRESPONSE_ENCODING_DEFAULTBINARY);
@@ -392,90 +393,20 @@ processOPNResponseDecoded(UA_Client *client, const UA_ByteString *message, size_
         return;
     }
 
+    UA_Float lifetime = (UA_Float)response.securityToken.revisedLifetime / 1000;
     UA_Boolean renew = (client->channel.state == UA_SECURECHANNELSTATE_OPEN);
-    if(renew)
-        UA_LOG_INFO_CHANNEL(&client->config.logger, &client->channel, "SecureChannel renewed");
-    else
+    if(renew) {
+        UA_LOG_INFO_CHANNEL(&client->config.logger, &client->channel, "SecureChannel "
+                            "renewed with a revised lifetime of %.2fs", lifetime);
+    } else {
         UA_LOG_INFO_CHANNEL(&client->config.logger, &client->channel,
-                            "Opened SecureChannel with SecurityPolicy %.*s",
+                            "SecureChannel opened with SecurityPolicy %.*s "
+                            "and a revised lifetime of %.2fs",
                             (int)client->channel.securityPolicy->policyUri.length,
-                            client->channel.securityPolicy->policyUri.data);
+                            client->channel.securityPolicy->policyUri.data, lifetime);
+    }
 
     client->channel.state = UA_SECURECHANNELSTATE_OPEN;
-}
-
-void
-processOPNResponse(UA_Client *client, UA_ByteString *chunk) {
-    UA_SecureChannel *channel = &client->channel;
-    if(channel->state != UA_SECURECHANNELSTATE_OPN_SENT &&
-       channel->state != UA_SECURECHANNELSTATE_OPEN) {
-        UA_LOG_ERROR_CHANNEL(&client->config.logger, channel,
-                             "Received an unexpected OPN response");
-        channel->state = UA_SECURECHANNELSTATE_CLOSING;
-        return;
-    }
-
-    /* Skip the first header. We know length and message type. */
-    size_t offset = UA_SECURE_CONVERSATION_MESSAGE_HEADER_LENGTH;
-
-    /* Decode the asymmetric algorithm security header and call the callback
-     * to perform checks. */
-    UA_AsymmetricAlgorithmSecurityHeader asymHeader;
-    UA_AsymmetricAlgorithmSecurityHeader_init(&asymHeader);
-    UA_StatusCode retval =
-        UA_AsymmetricAlgorithmSecurityHeader_decodeBinary(chunk, &offset, &asymHeader);
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING_CHANNEL(&client->config.logger, channel,
-                               "Could not decode the OPN header");
-        closeSecureChannel(client);
-        return;
-    }
-
-    /* Verify the certificate before creating the SecureChannel with it */
-    if(asymHeader.senderCertificate.length > 0) {
-        retval = client->config.certificateVerification.
-            verifyCertificate(client->config.certificateVerification.context,
-                              &asymHeader.senderCertificate);
-        if(retval != UA_STATUSCODE_GOOD) {
-            UA_LOG_WARNING_CHANNEL(&client->config.logger, channel,
-                                   "Could not verify the server's certificate");
-            closeSecureChannel(client);
-            return;
-        }
-    }
-
-    retval = checkAsymHeader(channel, &asymHeader);
-    UA_AsymmetricAlgorithmSecurityHeader_clear(&asymHeader);
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING_CHANNEL(&client->config.logger, channel,
-                               "Could not verify the OPN header");
-        closeSecureChannel(client);
-        return;
-    }
-
-    retval = decryptAndVerifyChunk(channel, &channel->securityPolicy->asymmetricModule.cryptoModule,
-                                   UA_MESSAGETYPE_OPN, chunk, offset);
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING_CHANNEL(&client->config.logger, channel,
-                               "Could not decrypt and verify the OPN payload");
-        closeSecureChannel(client);
-        return;
-    }
-
-   /* Decode and verify the sequence header */
-    UA_SequenceHeader sequenceHeader;
-    retval = UA_SequenceHeader_decodeBinary(chunk, &offset, &sequenceHeader);
-#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-    retval |= processSequenceNumberAsym(channel, sequenceHeader.sequenceNumber);
-#endif
-    if(retval != UA_STATUSCODE_GOOD) {
-        UA_LOG_WARNING_CHANNEL(&client->config.logger, channel,
-                               "Could not process the OPN sequence number");
-        closeSecureChannel(client);
-        return;
-    }
-
-    processOPNResponseDecoded(client, chunk, offset);
 }
 
 /* OPN messges to renew the channel are sent asynchronous */
@@ -534,14 +465,15 @@ sendOPNAsync(UA_Client *client, UA_Boolean renew) {
     return UA_STATUSCODE_GOOD;
 }
 
-void
-renewSecureChannel(UA_Client *client) {
+UA_StatusCode
+UA_Client_renewSecureChannel(UA_Client *client) {
     /* Check if OPN has been sent or the SecureChannel is still valid */
     if(client->channel.state != UA_SECURECHANNELSTATE_OPEN ||
        client->channel.renewState == UA_SECURECHANNELRENEWSTATE_SENT ||
        client->nextChannelRenewal > UA_DateTime_nowMonotonic())
-        return;
+        return UA_STATUSCODE_GOODCALLAGAIN;
     sendOPNAsync(client, true);
+    return client->connectStatus;
 }
 
 static void
@@ -909,6 +841,9 @@ createSessionAsync(UA_Client *client) {
     return client->connectStatus;
 }
 
+static UA_StatusCode
+initConnect(UA_Client *client);
+
 UA_StatusCode
 connectIterate(UA_Client *client, UA_UInt32 timeout) {
     UA_LOG_TRACE(&client->config.logger, UA_LOGCATEGORY_CLIENT,
@@ -928,18 +863,16 @@ connectIterate(UA_Client *client, UA_UInt32 timeout) {
         return UA_STATUSCODE_BADCONNECTIONCLOSED;
     }
 
-    /* TCP connection */
-    if(client->connection.state == UA_CONNECTIONSTATE_CLOSED) {
-        /* Reopen a new TCP connection */
-        client->connection =
-            client->config.initConnectionFunc(client->config.localConnectionConfig,
-                                              client->endpointUrl, client->config.timeout,
-                                              &client->config.logger);
-        return client->connectStatus;
-    } else if(client->connection.state == UA_CONNECTIONSTATE_OPENING) {
-        /* Poll the connection status */
+    /* The connection is closed. Reset the SecureChannel and open a new TCP
+     * connection */
+    if(client->connection.state == UA_CONNECTIONSTATE_CLOSED)
+        return initConnect(client);
+
+    /* Poll the connection status */
+    if(client->connection.state == UA_CONNECTIONSTATE_OPENING) {
         client->connectStatus =
-            client->config.pollConnectionFunc(client, &client->connection, timeout);
+            client->config.pollConnectionFunc(&client->connection, timeout,
+                                              &client->config.logger);
         return client->connectStatus;
     }
 
@@ -974,7 +907,7 @@ connectIterate(UA_Client *client, UA_UInt32 timeout) {
 
     /* Open the SecureChannel */
     switch(client->channel.state) {
-    case UA_SECURECHANNELSTATE_CLOSED:
+    case UA_SECURECHANNELSTATE_FRESH:
         client->connectStatus = sendHELMessage(client);
         if(client->connectStatus == UA_STATUSCODE_GOOD) {
             client->channel.state = UA_SECURECHANNELSTATE_HEL_SENT;
@@ -1048,7 +981,14 @@ verifyClientApplicationURI(const UA_Client *client) {
 }
 
 static UA_StatusCode
-initConnect(UA_Client *client, const char *endpointUrl) {
+client_configure_securechannel(void *application, UA_SecureChannel *channel,
+                               const UA_AsymmetricAlgorithmSecurityHeader *asymHeader) {
+    // TODO: Verify if certificate is the same as configured in the client endpoint config
+    return UA_STATUSCODE_GOOD;
+}
+
+static UA_StatusCode
+initConnect(UA_Client *client) {
     if(client->connection.state > UA_CONNECTIONSTATE_CLOSED) {
         UA_LOG_WARNING(&client->config.logger, UA_LOGCATEGORY_CLIENT,
                        "Client already connected");
@@ -1071,10 +1011,8 @@ initConnect(UA_Client *client, const char *endpointUrl) {
 
     /* Initialize the SecureChannel */
     UA_SecureChannel_init(&client->channel, &client->config.localConnectionConfig);
-
-    /* Set the endpoint URL the client connects to */
-    UA_String_clear(&client->endpointUrl);
-    client->endpointUrl = UA_STRING_ALLOC(endpointUrl);
+    client->channel.certificateVerification = &client->config.certificateVerification;
+    client->channel.processOPNHeader = client_configure_securechannel;
 
     if(client->connection.free)
         client->connection.free(&client->connection);
@@ -1097,22 +1035,36 @@ initConnect(UA_Client *client, const char *endpointUrl) {
 
 UA_StatusCode
 UA_Client_connectAsync(UA_Client *client, const char *endpointUrl) {
+    /* Set the endpoint URL the client connects to */
+    UA_String_clear(&client->endpointUrl);
+    client->endpointUrl = UA_STRING_ALLOC(endpointUrl);
+
+    /* Open a Session when possible */
     client->noSession = false;
-    return initConnect(client, endpointUrl);
+
+    /* Connect Async */
+    return initConnect(client);
 }
 
 UA_StatusCode
 UA_Client_connectSecureChannelAsync(UA_Client *client, const char *endpointUrl) {
+    /* Set the endpoint URL the client connects to */
+    UA_String_clear(&client->endpointUrl);
+    client->endpointUrl = UA_STRING_ALLOC(endpointUrl);
+
+    /* Don't open a Session */
     client->noSession = true;
-    return initConnect(client, endpointUrl);
+
+    /* Connect Async */
+    return initConnect(client);
 }
 
 static UA_StatusCode
-connectSync(UA_Client *client, const char *endpointUrl) {
+connectSync(UA_Client *client) {
     UA_DateTime now = UA_DateTime_nowMonotonic();
     UA_DateTime maxDate = now + ((UA_DateTime)client->config.timeout * UA_DATETIME_MSEC);
 
-    UA_StatusCode retval = initConnect(client, endpointUrl);
+    UA_StatusCode retval = initConnect(client);
     if(retval != UA_STATUSCODE_GOOD)
         return retval;
 
@@ -1124,7 +1076,8 @@ connectSync(UA_Client *client, const char *endpointUrl) {
         now = UA_DateTime_nowMonotonic();
         if(maxDate < now)
             return UA_STATUSCODE_BADTIMEOUT;
-        retval = UA_Client_run_iterate(client, (UA_UInt32)((maxDate - now) / UA_DATETIME_MSEC));
+        retval = UA_Client_run_iterate(client,
+                                       (UA_UInt32)((maxDate - now) / UA_DATETIME_MSEC));
     }
 
     return retval;
@@ -1132,14 +1085,28 @@ connectSync(UA_Client *client, const char *endpointUrl) {
 
 UA_StatusCode
 UA_Client_connect(UA_Client *client, const char *endpointUrl) {
+    /* Set the endpoint URL the client connects to */
+    UA_String_clear(&client->endpointUrl);
+    client->endpointUrl = UA_STRING_ALLOC(endpointUrl);
+
+    /* Open a Session when possible */
     client->noSession = false;
-    return connectSync(client, endpointUrl);
+
+    /* Connect Synchronous */
+    return connectSync(client);
 }
 
 UA_StatusCode
 UA_Client_connectSecureChannel(UA_Client *client, const char *endpointUrl) {
+    /* Set the endpoint URL the client connects to */
+    UA_String_clear(&client->endpointUrl);
+    client->endpointUrl = UA_STRING_ALLOC(endpointUrl);
+
+    /* Don't open a Session */
     client->noSession = true;
-    return connectSync(client, endpointUrl);
+
+    /* Connect Synchronous */
+    return connectSync(client);
 }
 
 /************************/
@@ -1185,8 +1152,8 @@ sendCloseSession(UA_Client *client) {
     UA_CloseSessionResponse response;
     __UA_Client_Service(client, &request, &UA_TYPES[UA_TYPES_CLOSESESSIONREQUEST],
                         &response, &UA_TYPES[UA_TYPES_CLOSESESSIONRESPONSE]);
-    UA_CloseSessionRequest_deleteMembers(&request);
-    UA_CloseSessionResponse_deleteMembers(&response);
+    UA_CloseSessionRequest_clear(&request);
+    UA_CloseSessionResponse_clear(&response);
 }
 
 static void
@@ -1195,7 +1162,7 @@ closeSession(UA_Client *client) {
     if(client->sessionState == UA_SESSIONSTATE_ACTIVATED)
         sendCloseSession(client);
 
-    UA_NodeId_deleteMembers(&client->authenticationToken);
+    UA_NodeId_clear(&client->authenticationToken);
     client->requestHandle = 0;
     client->sessionState = UA_SESSIONSTATE_CLOSED;
 
