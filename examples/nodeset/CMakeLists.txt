@@ -104,7 +104,52 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
                 ${UA_TYPES_PLC_SOURCES})
     add_dependencies(server_nodeset_plcopen open62541-generator-ns-plc)
 
-    # POWERLINK requires the full ns0 as basis
+
+    ####################
+    # Euromap Examples #
+    ####################
+
+
+    # generate euromap83 namespace which is using DI
+    ua_generate_nodeset_and_datatypes(
+        NAME "euromap83"
+        FILE_CSV "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.GeneralTypes.NodeSet2.csv"
+        FILE_BSD "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.GeneralTypes.NodeSet2.bsd"
+        IMPORT_BSD "UA_TYPES#${FILE_NS_DIRPREFIX}/Schema/Opc.Ua.Types.bsd"
+        NAMESPACE_IDX 3
+        FILE_NS "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.GeneralTypes.NodeSet2.xml"
+        DEPENDS "di"
+        INTERNAL
+    )
+
+    # generate euromap82.2 namespace which is using euromap83
+    ua_generate_nodeset_and_datatypes(
+        NAME "euromap82_2"
+        FILE_CSV "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.HotRunner.NodeSet2.csv"
+        FILE_BSD "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.HotRunner.NodeSet2.bsd"
+        IMPORT_BSD "UA_TYPES#${FILE_NS_DIRPREFIX}/Schema/Opc.Ua.Types.bsd"
+        NAMESPACE_IDX 4
+        FILE_NS "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.HotRunner.NodeSet2.xml"
+        DEPENDS "euromap83"
+        INTERNAL
+    )
+
+    add_example(server_nodeset_euromap euromap/server_nodeset_euromap.c
+                ${UA_NODESET_DI_SOURCES}
+                ${UA_NODESET_EUROMAP83_SOURCES}
+                ${UA_NODESET_EUROMAP82_2_SOURCES}
+                ${UA_TYPES_DI_SOURCES}
+                ${UA_TYPES_EUROMAP83_SOURCES}
+                ${UA_TYPES_EUROMAP82_2_SOURCES}
+                )
+    add_dependencies(server_nodeset_euromap open62541-generator-ns-euromap82_2)
+
+endif()
+
+# POWERLINK requires the full ns0 as basis
+
+if(UA_NAMESPACE_ZERO STREQUAL "FULL")
+
     # generate powerlink namespace which is using DI
     ua_generate_nodeset_and_datatypes(
         NAME "powerlink"
