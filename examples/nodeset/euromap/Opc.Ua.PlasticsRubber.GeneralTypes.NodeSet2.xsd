@@ -63,7 +63,7 @@
             <xs:enumeration value="ACTIVE_OK_1"/>
             <xs:enumeration value="ACTIVE_ERROR_DETECTED_2"/>
             <xs:enumeration value="COMPLETE_3"/>
-            <xs:enumeration value="COMPLETE_ERROR_4"/>
+            <xs:enumeration value="COMPLETE_ERROR_DETECTED_4"/>
         </xs:restriction>
     </xs:simpleType>
     <xs:element type="tns:DiagnosticsStatusEnumeration" name="DiagnosticsStatusEnumeration"/>
@@ -198,22 +198,6 @@
         </xs:sequence>
     </xs:complexType>
     <xs:element type="tns:ListOfMouldStatusEnumeration" name="ListOfMouldStatusEnumeration" nillable="true"/>
-    <xs:simpleType name="ProductionDatasetComponentEnumeration">
-        <xs:annotation>
-            <xs:documentation>Informs for which machines information is included in the production dataset file</xs:documentation>
-        </xs:annotation>
-        <xs:restriction base="xs:string">
-            <xs:enumeration value="IMM_0"/>
-            <xs:enumeration value="ROBOT_1"/>
-        </xs:restriction>
-    </xs:simpleType>
-    <xs:element type="tns:ProductionDatasetComponentEnumeration" name="ProductionDatasetComponentEnumeration"/>
-    <xs:complexType name="ListOfProductionDatasetComponentEnumeration">
-        <xs:sequence>
-            <xs:element minOccurs="0" maxOccurs="unbounded" type="tns:ProductionDatasetComponentEnumeration" name="ProductionDatasetComponentEnumeration" nillable="true"/>
-        </xs:sequence>
-    </xs:complexType>
-    <xs:element type="tns:ListOfProductionDatasetComponentEnumeration" name="ListOfProductionDatasetComponentEnumeration" nillable="true"/>
     <xs:simpleType name="ProductionStatusEnumeration">
         <xs:annotation>
             <xs:documentation>Production status of the machine</xs:documentation>
@@ -340,10 +324,30 @@
         </xs:sequence>
     </xs:complexType>
     <xs:element type="tns:ListOfActiveErrorDataType" name="ListOfActiveErrorDataType" nillable="true"/>
+    <xs:complexType name="ClassifiedActiveErrorDataType">
+        <xs:annotation>
+            <xs:documentation>Iinformation about an active error in a device including the SoureNodes and a Classification</xs:documentation>
+        </xs:annotation>
+        <xs:complexContent mixed="false">
+            <xs:extension base="tns:ActiveErrorDataType">
+                <xs:sequence>
+                    <xs:element minOccurs="0" maxOccurs="1" type="ua:ListOfNodeId" name="SourceNodes"/>
+                    <xs:element minOccurs="0" maxOccurs="1" type="xs:unsignedShort" name="Classification"/>
+                </xs:sequence>
+            </xs:extension>
+        </xs:complexContent>
+    </xs:complexType>
+    <xs:element type="tns:ClassifiedActiveErrorDataType" name="ClassifiedActiveErrorDataType"/>
+    <xs:complexType name="ListOfClassifiedActiveErrorDataType">
+        <xs:sequence>
+            <xs:element minOccurs="0" maxOccurs="unbounded" type="tns:ClassifiedActiveErrorDataType" name="ClassifiedActiveErrorDataType" nillable="true"/>
+        </xs:sequence>
+    </xs:complexType>
+    <xs:element type="tns:ListOfClassifiedActiveErrorDataType" name="ListOfClassifiedActiveErrorDataType" nillable="true"/>
     <xs:complexType name="ConfigurationParameterType">
         <xs:sequence>
             <xs:element minOccurs="0" maxOccurs="1" type="xs:unsignedInt" name="Id"/>
-            <xs:element minOccurs="0" maxOccurs="1" type="ua:LocalizedText" name="Name"/>
+            <xs:element minOccurs="0" maxOccurs="1" type="ua:LocalizedText" name="Description"/>
             <xs:element minOccurs="0" maxOccurs="1" type="ua:Variant" name="DefaultValue"/>
             <xs:element minOccurs="0" maxOccurs="1" type="ua:EUInformation" name="Unit"/>
         </xs:sequence>
@@ -463,11 +467,11 @@
             <xs:element minOccurs="0" maxOccurs="1" type="xs:dateTime" name="LastModificationTimestamp"/>
             <xs:element minOccurs="0" maxOccurs="1" type="xs:dateTime" name="LastSaveTimestamp"/>
             <xs:element minOccurs="0" maxOccurs="1" type="xs:string" name="UserName"/>
-            <xs:element minOccurs="0" maxOccurs="1" type="tns:ListOfProductionDatasetComponentEnumeration" name="Components"/>
+            <xs:element minOccurs="0" maxOccurs="1" type="ua:ListOfUInt16" name="Components"/>
             <xs:element minOccurs="0" maxOccurs="1" type="xs:string" name="Manufacturer"/>
             <xs:element minOccurs="0" maxOccurs="1" type="xs:string" name="SerialNumber"/>
             <xs:element minOccurs="0" maxOccurs="1" type="xs:string" name="Model"/>
-            <xs:element minOccurs="0" maxOccurs="1" type="xs:string" name="ControllerType"/>
+            <xs:element minOccurs="0" maxOccurs="1" type="xs:string" name="ControllerName"/>
             <xs:element minOccurs="0" maxOccurs="1" type="xs:string" name="UserMachineName"/>
             <xs:element minOccurs="0" maxOccurs="1" type="xs:string" name="LocationName"/>
             <xs:element minOccurs="0" maxOccurs="1" type="ua:ListOfString" name="ProductName"/>
@@ -505,7 +509,7 @@
         <xs:sequence>
             <xs:element minOccurs="0" maxOccurs="1" type="tns:StorageEnumeration" name="Storage"/>
             <xs:element minOccurs="0" maxOccurs="1" type="xs:string" name="Name"/>
-            <xs:element minOccurs="0" maxOccurs="1" type="tns:ListOfProductionDatasetComponentEnumeration" name="Components"/>
+            <xs:element minOccurs="0" maxOccurs="1" type="ua:ListOfUInt16" name="Components"/>
         </xs:sequence>
     </xs:complexType>
     <xs:element type="tns:ProductionDatasetWriteOptionsType" name="ProductionDatasetWriteOptionsType"/>

@@ -116,7 +116,7 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
         FILE_CSV "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.GeneralTypes.NodeSet2.csv"
         FILE_BSD "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.GeneralTypes.NodeSet2.bsd"
         IMPORT_BSD "UA_TYPES#${FILE_NS_DIRPREFIX}/Schema/Opc.Ua.Types.bsd"
-        NAMESPACE_IDX 3
+        NAMESPACE_MAP "3:http://opcfoundation.org/UA/PlasticsRubber/GeneralTypes/"
         FILE_NS "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.GeneralTypes.NodeSet2.xml"
         DEPENDS "di"
         INTERNAL
@@ -128,7 +128,7 @@ if(UA_NAMESPACE_ZERO STREQUAL "FULL")
         FILE_CSV "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.HotRunner.NodeSet2.csv"
         FILE_BSD "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.HotRunner.NodeSet2.bsd"
         IMPORT_BSD "UA_TYPES#${FILE_NS_DIRPREFIX}/Schema/Opc.Ua.Types.bsd"
-        NAMESPACE_IDX 4
+        NAMESPACE_MAP "4:http://opcfoundation.org/UA/PlasticsRubber/HotRunner/"
         FILE_NS "${PROJECT_SOURCE_DIR}/nodeset/euromap/Opc.Ua.PlasticsRubber.HotRunner.NodeSet2.xml"
         DEPENDS "euromap83"
         INTERNAL

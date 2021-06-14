@@ -6,9 +6,18 @@
         <opc:Field TypeName="opc:UInt16" Name="Severity"/>
         <opc:Field TypeName="ua:LocalizedText" Name="Message"/>
     </opc:StructuredType>
+    <opc:StructuredType BaseType="tns:ActiveErrorDataType" Name="ClassifiedActiveErrorDataType">
+        <opc:Documentation>Iinformation about an active error in a device including the SoureNodes and a Classification</opc:Documentation>
+        <opc:Field SourceType="tns:ActiveErrorDataType" TypeName="opc:CharArray" Name="Id"/>
+        <opc:Field SourceType="tns:ActiveErrorDataType" TypeName="opc:UInt16" Name="Severity"/>
+        <opc:Field SourceType="tns:ActiveErrorDataType" TypeName="ua:LocalizedText" Name="Message"/>
+        <opc:Field TypeName="opc:Int32" Name="NoOfSourceNodes"/>
+        <opc:Field LengthField="NoOfSourceNodes" TypeName="ua:NodeId" Name="SourceNodes"/>
+        <opc:Field TypeName="opc:UInt16" Name="Classification"/>
+    </opc:StructuredType>
     <opc:StructuredType BaseType="ua:ExtensionObject" Name="ConfigurationParameterType">
         <opc:Field TypeName="opc:UInt32" Name="Id"/>
-        <opc:Field TypeName="ua:LocalizedText" Name="Name"/>
+        <opc:Field TypeName="ua:LocalizedText" Name="Description"/>
         <opc:Field TypeName="ua:Variant" Name="DefaultValue"/>
         <opc:Field TypeName="ua:EUInformation" Name="Unit"/>
     </opc:StructuredType>
@@ -80,11 +89,11 @@
         <opc:Field TypeName="opc:DateTime" Name="LastSaveTimestamp"/>
         <opc:Field TypeName="opc:CharArray" Name="UserName"/>
         <opc:Field TypeName="opc:Int32" Name="NoOfComponents"/>
-        <opc:Field LengthField="NoOfComponents" TypeName="tns:ProductionDatasetComponentEnumeration" Name="Components"/>
+        <opc:Field LengthField="NoOfComponents" TypeName="opc:UInt16" Name="Components"/>
         <opc:Field TypeName="opc:CharArray" Name="Manufacturer"/>
         <opc:Field TypeName="opc:CharArray" Name="SerialNumber"/>
         <opc:Field TypeName="opc:CharArray" Name="Model"/>
-        <opc:Field TypeName="opc:CharArray" Name="ControllerType"/>
+        <opc:Field TypeName="opc:CharArray" Name="ControllerName"/>
         <opc:Field TypeName="opc:CharArray" Name="UserMachineName"/>
         <opc:Field TypeName="opc:CharArray" Name="LocationName"/>
         <opc:Field TypeName="opc:Int32" Name="NoOfProductName"/>
@@ -102,7 +111,7 @@
         <opc:Field TypeName="tns:StorageEnumeration" Name="Storage"/>
         <opc:Field TypeName="opc:CharArray" Name="Name"/>
         <opc:Field TypeName="opc:Int32" Name="NoOfComponents"/>
-        <opc:Field LengthField="NoOfComponents" TypeName="tns:ProductionDatasetComponentEnumeration" Name="Components"/>
+        <opc:Field LengthField="NoOfComponents" TypeName="opc:UInt16" Name="Components"/>
     </opc:StructuredType>
     <opc:StructuredType BaseType="ua:ExtensionObject" Name="StandstillReasonType">
         <opc:Documentation>Description of a standstill reason</opc:Documentation>
@@ -139,7 +148,7 @@
         <opc:EnumeratedValue Name="ACTIVE_OK" Value="1"/>
         <opc:EnumeratedValue Name="ACTIVE_ERROR_DETECTED" Value="2"/>
         <opc:EnumeratedValue Name="COMPLETE" Value="3"/>
-        <opc:EnumeratedValue Name="COMPLETE_ERROR" Value="4"/>
+        <opc:EnumeratedValue Name="COMPLETE_ERROR_DETECTED" Value="4"/>
     </opc:EnumeratedType>
     <opc:EnumeratedType LengthInBits="32" Name="EventOriginatorEnumeration">
         <opc:Documentation>Originator of an event</opc:Documentation>
@@ -199,11 +208,6 @@
         <opc:EnumeratedValue Name="MOULD_NOT_INSTALLED" Value="1"/>
         <opc:EnumeratedValue Name="MOULD_CHANGE" Value="2"/>
         <opc:EnumeratedValue Name="MOULD_INSTALLED" Value="3"/>
-    </opc:EnumeratedType>
-    <opc:EnumeratedType LengthInBits="32" Name="ProductionDatasetComponentEnumeration">
-        <opc:Documentation>Informs for which machines information is included in the production dataset file</opc:Documentation>
-        <opc:EnumeratedValue Name="IMM" Value="0"/>
-        <opc:EnumeratedValue Name="ROBOT" Value="1"/>
     </opc:EnumeratedType>
     <opc:EnumeratedType LengthInBits="32" Name="ProductionStatusEnumeration">
         <opc:Documentation>Production status of the machine</opc:Documentation>
